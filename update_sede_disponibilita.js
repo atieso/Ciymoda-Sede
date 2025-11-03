@@ -1,13 +1,10 @@
-// update_sede_disponibilita.js
-// Aggiorna il metafield di variante custom.sede_disponibilita
-// Sedi in priorità da secret LOCATION_PRIORITY, default: "CityModa Lecce|Citymoda Triggiano"
+// update_sede_disponibilita.js – versione con quantities()
+// Aggiorna custom.sede_disponibilita scegliendo la prima sede con available > 0
 
 const SHOP = process.env.SHOPIFY_SHOP_DOMAIN;
 const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const PRIORITY = (process.env.LOCATION_PRIORITY || 'CityModa Lecce|Citymoda Triggiano').split('|').map(s=>s.trim());
 const VARIANTS_PER_RUN = parseInt(process.env.VARIANTS_PER_RUN || '400', 10);
-
-// Usa API version stabile
 const API_VERSION = '2025-10';
 
 if (!SHOP || !TOKEN) {
@@ -25,15 +22,11 @@ async function GQL(query, variables) {
     body: JSON.stringify({ query, variables })
   });
   const text = await res.text();
-
-  // Prova a fare parse JSON, se fallisce mostra raw
   let json;
-  try { json = JSON.parse(text); } catch (e) {
-    console.error(`❌ GraphQL HTTP ${res.status} ${res.statusText} - Non-JSON body:`);
-    console.error(text);
+  try { json = JSON.parse(text); } catch {
+    console.error(`❌ GraphQL HTTP ${res.status} ${res.statusText} – Non-JSON body:\n${text}`);
     throw new Error(`GraphQL HTTP ${res.status}`);
   }
-
   if (!res.ok || json.errors) {
     console.error(`❌ GraphQL HTTP ${res.status} ${res.statusText}`);
     if (json.errors) console.error('Errors:', JSON.stringify(json.errors, null, 2));
@@ -43,9 +36,10 @@ async function GQL(query, variables) {
   return json.data;
 }
 
+// ⚠️ USIAMO quantities(names:["available"]) al posto di InventoryLevel.available
 const qVariants = `
 query($after: String) {
-  productVariants(first: 200, after: $after, query:"status:active") {
+  productVariants(first: 200, after: $after, query: "status:active") {
     pageInfo { hasNextPage endCursor }
     edges {
       node {
@@ -55,7 +49,12 @@ query($after: String) {
         inventoryItem {
           id
           inventoryLevels(first: 50) {
-            edges { node { available location { id name } } }
+            edges {
+              node {
+                location { id name }
+                quantities(names: ["available"]) { name quantity }
+              }
+            }
           }
         }
       }
@@ -74,11 +73,12 @@ mutation setMeta($metafields: [MetafieldsSetInput!]!) {
 `;
 
 function chooseLocation(levels) {
+  // levels: [{ available, location:{name} }]
   for (const wanted of PRIORITY) {
     const lvl = levels.find(l => l.location?.name === wanted);
     if (lvl && (lvl.available || 0) > 0) return wanted;
   }
-  return ""; // nessuna disponibile
+  return "";
 }
 
 async function run() {
@@ -86,37 +86,30 @@ async function run() {
   console.log(`Priority: ${PRIORITY.join(' > ')}`);
   console.log(`API: ${API_VERSION}`);
 
-  // Check scopes minimi con una query banalissima
-  try {
-    await GQL(`{ shop { name } }`, {});
-  } catch (e) {
-    console.error('❌ Verifica token/scopes fallita. Scopes richiesti: read_products, write_products, read_inventory, read_locations');
-    throw e;
-  }
+  // Sanity check token/scopes
+  await GQL(`{ shop { name } }`, {});
 
   let after = null;
   let processed = 0, updated = 0;
 
   while (processed < VARIANTS_PER_RUN) {
-    let data;
-    try {
-      data = await GQL(qVariants, { after });
-    } catch (e) {
-      console.error('❌ Errore nel fetch delle varianti. Fermiamo il ciclo.');
-      throw e;
-    }
-
+    const data = await GQL(qVariants, { after });
     const edges = data.productVariants.edges || [];
-    if (edges.length === 0) {
-      console.log('ℹ️ Nessuna variante trovata in questa pagina.');
-      break;
-    }
+    if (edges.length === 0) break;
 
     for (const { node } of edges) {
       if (processed >= VARIANTS_PER_RUN) break;
       processed++;
 
-      const levels = (node.inventoryItem?.inventoryLevels?.edges || []).map(e => e.node);
+      // Mappa livelli: estrae la quantity dal blocco quantities (name === "available")
+      const levels = (node.inventoryItem?.inventoryLevels?.edges || []).map(e => {
+        const qAvail = (e.node.quantities || []).find(q => q.name === 'available');
+        return {
+          available: qAvail ? (qAvail.quantity || 0) : 0,
+          location: e.node.location
+        };
+      });
+
       const chosen = chooseLocation(levels);
 
       const metafields = [{
@@ -137,7 +130,6 @@ async function run() {
           console.log(`✔ ${node.sku || node.title} -> "${chosen || '(vuoto)'}"`);
         }
       } catch (e) {
-        // Logga, ma NON interrompere tutto: andiamo avanti con le altre
         console.error(`❌ Mutation error per ${node.sku || node.title}:`, e.message);
       }
     }
@@ -150,7 +142,6 @@ async function run() {
 }
 
 run().catch(e => {
-  // Mantieni il codice 1 per far fallire il job solo quando è davvero bloccante
   console.error('💥 Task failed:', e.message);
   process.exit(1);
 });
