@@ -8,27 +8,32 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    # Se i secrets sono in un Environment, decommenta la riga sotto e metti il nome
+    # environment: production
+    env:
+      SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
+      SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+      LOCATION_PRIORITY: ${{ secrets.LOCATION_PRIORITY }}
+      VARIANTS_PER_RUN: "400"
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
 
       - name: Check env presence (masked)
         run: |
           echo "SHOP: ${SHOPIFY_SHOP_DOMAIN:+set}"
           echo "TOKEN: ${SHOPIFY_ACCESS_TOKEN:+set}"
           echo "PRIORITY: ${LOCATION_PRIORITY:+set}"
-        env:
-          SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
-          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
-          LOCATION_PRIORITY: ${{ secrets.LOCATION_PRIORITY }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Guard - fail if missing secrets
+        run: |
+          if [ -z "${SHOPIFY_SHOP_DOMAIN}" ] || [ -z "${SHOPIFY_ACCESS_TOKEN}" ]; then
+            echo "❌ Secrets mancanti. Assicurati che SHOPIFY_SHOP_DOMAIN e SHOPIFY_ACCESS_TOKEN siano definiti nei Repository secrets."
+            exit 1
+          fi
 
       - name: Run updater
         run: node update_sede_disponibilita.js
-        env:
-          SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
-          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
-          LOCATION_PRIORITY: ${{ secrets.LOCATION_PRIORITY }}
-          VARIANTS_PER_RUN: "400"
