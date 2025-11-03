@@ -2,18 +2,20 @@ name: Update sede_disponibilita
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # ogni 30 minuti
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    environment: production   # <— lo stesso nome dell’Environment dove hai messo i secrets
+    environment: production      # se usi Environment per i secrets
     env:
       SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
       SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
       LOCATION_PRIORITY: ${{ secrets.LOCATION_PRIORITY }}
       VARIANTS_PER_RUN: "10000"
+      # Facoltativo: filtra per SKU durante i test
+      # TEST_SKUS: "SKU1|SKU2"
     steps:
       - uses: actions/checkout@v4
 
@@ -27,12 +29,12 @@ jobs:
         with:
           node-version: 20
 
-      - name: Guard - fail if missing secrets
-        run: |
-          if [ -z "${SHOPIFY_SHOP_DOMAIN}" ] || [ -z "${SHOPIFY_ACCESS_TOKEN}" ]; then
-            echo "❌ Secrets mancanti nell'environment '${GITHUB_ENVIRONMENT}'."
-            exit 1
-          fi
-
       - name: Run updater
         run: node update_sede_disponibilita.js
+
+      - name: Upload CSV report
+        uses: actions/upload-artifact@v4
+        with:
+          name: sede_updates
+          path: /tmp/sede_updates.csv
+          if-no-files-found: warn
