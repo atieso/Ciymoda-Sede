@@ -2,25 +2,33 @@ name: Update sede_disponibilita
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # ogni 10 minuti
-  workflow_dispatch: {}       # run manuale
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: node update_sede_disponibilita.js
-- name: Check env presence (masked)
-  run: |
-    echo "SHOP: ${SHOPIFY_SHOP_DOMAIN:+set}"
-    echo "TOKEN: ${SHOPIFY_ACCESS_TOKEN:+set}"
-    echo "PRIORITY: ${LOCATION_PRIORITY:+set}"
-  env:
-    SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
-    SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
-    LOCATION_PRIORITY: ${{ secrets.LOCATION_PRIORITY }}
 
+      - name: Check env presence (masked)
+        run: |
+          echo "SHOP: ${SHOPIFY_SHOP_DOMAIN:+set}"
+          echo "TOKEN: ${SHOPIFY_ACCESS_TOKEN:+set}"
+          echo "PRIORITY: ${LOCATION_PRIORITY:+set}"
+        env:
+          SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          LOCATION_PRIORITY: ${{ secrets.LOCATION_PRIORITY }}
+
+      - name: Run updater
+        run: node update_sede_disponibilita.js
+        env:
+          SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          LOCATION_PRIORITY: ${{ secrets.LOCATION_PRIORITY }}
+          VARIANTS_PER_RUN: "400"
