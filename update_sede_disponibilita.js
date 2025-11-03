@@ -9,7 +9,7 @@ const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const PRIORITY = (process.env.LOCATION_PRIORITY || 'CityModa Lecce|Citymoda Triggiano')
   .split('|')
   .map(s => s.trim());
-const VARIANTS_PER_RUN = parseInt(process.env.VARIANTS_PER_RUN || '10000', 30);
+const VARIANTS_PER_RUN = parseInt(process.env.VARIANTS_PER_RUN || '10000', 10);
 const API_VERSION = '2025-10';
 
 if (!SHOP || !TOKEN) {
