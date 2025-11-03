@@ -4,7 +4,7 @@ import fs from "node:fs";
 const SHOP = process.env.SHOPIFY_SHOP_DOMAIN;
 const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const PRIORITY = (process.env.LOCATION_PRIORITY || 'CityModa Lecce|Citymoda Triggiano').split('|').map(s=>s.trim());
-const VARIANTS_PER_RUN = parseInt(process.env.VARIANTS_PER_RUN || '20000', 10);
+const VARIANTS_PER_RUN = parseInt(process.env.VARIANTS_PER_RUN || '30000', 10);
 const API_VERSION = '2025-10';
 const TEST_SKUS = (process.env.TEST_SKUS || '').split('|').map(s=>s.trim()).filter(Boolean);
 const ONLY_TEST = TEST_SKUS.length > 0;
