@@ -73,13 +73,23 @@ mutation setMeta($metafields: [MetafieldsSetInput!]!) {
 `;
 
 function chooseLocation(levels) {
-  // levels: [{ available, location:{name} }]
-  for (const wanted of PRIORITY) {
-    const lvl = levels.find(l => l.location?.name === wanted);
-    if (lvl && (lvl.available || 0) > 0) return wanted;
+  // Priorità in lower-case normalizzata
+  const priorityNorm = PRIORITY.map(n => n.trim().toLowerCase());
+
+  // 2a. Rispetta la priorità se i nomi combaciano (case-insensitive)
+  for (const wantedNorm of priorityNorm) {
+    const lvl = levels.find(l => l.locationNameNorm === wantedNorm);
+    if (lvl && (lvl.available || 0) > 0) return lvl.location.name; // restituisci il nome originale
   }
+
+  // 2b. Fallback intelligente: prima location con available > 0, anche se il nome non è in PRIORITY
+  const any = levels.find(l => (l.available || 0) > 0);
+  if (any) return any.location?.name || "";
+
+  // Nessuna disponibilità
   return "";
 }
+
 
 async function run() {
   console.log(`▶ Start. Shop: ${SHOP}`);
@@ -101,14 +111,22 @@ async function run() {
       if (processed >= VARIANTS_PER_RUN) break;
       processed++;
 
-      // Mappa livelli: estrae la quantity dal blocco quantities (name === "available")
-      const levels = (node.inventoryItem?.inventoryLevels?.edges || []).map(e => {
-        const qAvail = (e.node.quantities || []).find(q => q.name === 'available');
-        return {
-          available: qAvail ? (qAvail.quantity || 0) : 0,
-          location: e.node.location
-        };
-      });
+// Mappa livelli: estrae quantity da quantities e logga le sedi disponibili
+const levels = (node.inventoryItem?.inventoryLevels?.edges || []).map(e => {
+  const qAvail = (e.node.quantities || []).find(q => q.name === 'available');
+  return {
+    available: qAvail ? (qAvail.quantity || 0) : 0,
+    location: e.node.location,
+    locationNameNorm: (e.node.location?.name || "").trim().toLowerCase()
+  };
+});
+
+// Log diagnostico (vedi esattamente i nomi sedi restituiti)
+console.log(
+  `Levels for ${node.sku || node.title}:`,
+  levels.map(l => `${l.location?.name}:${l.available}`).join(" | ")
+);
+
 
       const chosen = chooseLocation(levels);
 
