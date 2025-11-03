@@ -13,7 +13,7 @@ jobs:
       SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
       SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
       LOCATION_PRIORITY: ${{ secrets.LOCATION_PRIORITY }}
-      VARIANTS_PER_RUN: "20000"
+      VARIANTS_PER_RUN: "30000"
       # Facoltativo: filtra per SKU durante i test
       # TEST_SKUS: "SKU1|SKU2"
     steps:
