@@ -1,51 +1,32 @@
-// update_sede_disponibilita.js – COMPLETO
-// Aggiorna il metafield di VARIANTE custom.sede_disponibilita scegliendo
-// la prima sede con stock > 0 secondo una priorità definita.
-// Richiede Admin API scopes: read_products, write_products, read_inventory, read_locations.
+// update_sede_disponibilita.js – con CSV report e filtri di test
+// Scopes necessari: read_products, write_products, read_inventory, read_locations
+
+import fs from "node:fs";
 
 const SHOP = process.env.SHOPIFY_SHOP_DOMAIN;
 const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
-// Puoi cambiare l'ordine con il secret LOCATION_PRIORITY (separatore "|")
-const PRIORITY = (process.env.LOCATION_PRIORITY || 'CityModa Lecce|Citymoda Triggiano')
-  .split('|')
-  .map(s => s.trim());
+const PRIORITY = (process.env.LOCATION_PRIORITY || 'CityModa Lecce|Citymoda Triggiano').split('|').map(s=>s.trim());
 const VARIANTS_PER_RUN = parseInt(process.env.VARIANTS_PER_RUN || '10000', 10);
 const API_VERSION = '2025-10';
 
-if (!SHOP || !TOKEN) {
-  console.error('❌ Missing env: SHOPIFY_SHOP_DOMAIN and/or SHOPIFY_ACCESS_TOKEN');
-  process.exit(1);
-}
+// Facoltativo: filtra per SKU specifici (separati da |), utile per test mirati
+const TEST_SKUS = (process.env.TEST_SKUS || '').split('|').map(s=>s.trim()).filter(Boolean);
+const ONLY_TEST = TEST_SKUS.length > 0;
 
-// Helper GraphQL
+if (!SHOP || !TOKEN) { console.error('❌ Missing env'); process.exit(1); }
+
 async function GQL(query, variables) {
   const res = await fetch(`https://${SHOP}/admin/api/${API_VERSION}/graphql.json`, {
     method: 'POST',
-    headers: {
-      'Content-Type':'application/json',
-      'X-Shopify-Access-Token': TOKEN
-    },
+    headers: { 'Content-Type':'application/json', 'X-Shopify-Access-Token': TOKEN },
     body: JSON.stringify({ query, variables })
   });
-
   const text = await res.text();
-  let json;
-  try { json = JSON.parse(text); }
-  catch {
-    console.error(`❌ GraphQL HTTP ${res.status} ${res.statusText} – Non-JSON body:\n${text}`);
-    throw new Error(`GraphQL HTTP ${res.status}`);
-  }
-
-  if (!res.ok || json.errors) {
-    console.error(`❌ GraphQL HTTP ${res.status} ${res.statusText}`);
-    if (json.errors) console.error('Errors:', JSON.stringify(json.errors, null, 2));
-    else console.error('Body:', JSON.stringify(json, null, 2));
-    throw new Error('GraphQL error');
-  }
+  let json; try { json = JSON.parse(text); } catch { console.error(text); throw new Error(`GraphQL HTTP ${res.status}`); }
+  if (!res.ok || json.errors) { console.error('❌ GraphQL', res.status, res.statusText, JSON.stringify(json.errors||json,null,2)); throw new Error('GraphQL error'); }
   return json.data;
 }
 
-// Query varianti: usa quantities(names:["available"]) sui livelli
 const qVariants = `
 query($after: String) {
   productVariants(first: 200, after: $after, query:"status:active") {
@@ -73,7 +54,6 @@ query($after: String) {
 }
 `;
 
-// Mutation set metafield
 const mSet = `
 mutation setMeta($metafields: [MetafieldsSetInput!]!) {
   metafieldsSet(metafields: $metafields) {
@@ -83,12 +63,11 @@ mutation setMeta($metafields: [MetafieldsSetInput!]!) {
 }
 `;
 
-// Scelta sede: rispetta PRIORITY case-insensitive; fallback alla prima con stock > 0
 function chooseLocation(levels) {
   const prio = PRIORITY.map(n => n.trim().toLowerCase());
   for (const wanted of prio) {
     const m = levels.find(l => l.locationNameNorm === wanted);
-    if (m && (m.available || 0) > 0) return m.location.name; // restituisce il nome originale
+    if (m && (m.available || 0) > 0) return m.location.name;
   }
   const any = levels.find(l => (l.available || 0) > 0);
   return any ? (any.location?.name || "") : "";
@@ -98,12 +77,12 @@ async function run() {
   console.log(`▶ Start. Shop: ${SHOP}`);
   console.log(`Priority: ${PRIORITY.join(' > ')}`);
   console.log(`API: ${API_VERSION}`);
+  if (ONLY_TEST) console.log(`TEST_SKUS attivo → elaboro solo: ${TEST_SKUS.join(', ')}`);
 
-  // Verifica token/scopes
-  await GQL(`{ shop { name } }`, {});
+  await GQL(`{ shop { name } }`, {}); // sanity token/scopes
 
-  let after = null;
-  let processed = 0, updated = 0;
+  let after = null, processed = 0, updated = 0, skipped = 0;
+  const changes = []; // per CSV
 
   while (processed < VARIANTS_PER_RUN) {
     const data = await GQL(qVariants, { after });
@@ -112,9 +91,12 @@ async function run() {
 
     for (const { node } of edges) {
       if (processed >= VARIANTS_PER_RUN) break;
-      processed++;
 
-      // Mappa livelli: quantity "available" + nomi normalizzati
+      // filtro per SKU se in test
+      if (ONLY_TEST && node.sku && !TEST_SKUS.includes(node.sku)) {
+        skipped++; processed++; continue;
+      }
+
       const levels = (node.inventoryItem?.inventoryLevels?.edges || []).map(e => {
         const qa = (e.node.quantities || []).find(q => q.name === 'available');
         return {
@@ -124,24 +106,23 @@ async function run() {
         };
       });
 
-      // Log diagnostico dei livelli (nomeSede:qty | ...)
+      // Log diagnostico livelli
       console.log(`Levels for ${node.sku || node.title}: ${levels.map(l => `${l.location?.name}:${l.available}`).join(' | ') || '—'}`);
 
       const chosen = chooseLocation(levels);
       const current = node.metafield?.value || "";
 
-      // Se uguale al corrente, salta
       if (current === chosen) {
+        skipped++; processed++;
         continue;
       }
 
-      // Prepara input metafield variante
       const metafields = [{
         ownerId: node.id,
         namespace: "custom",
         key: "sede_disponibilita",
         type: "single_line_text_field",
-        value: chosen // può essere "" se nessuna sede ha stock
+        value: chosen
       }];
 
       try {
@@ -149,27 +130,48 @@ async function run() {
         const errs = setRes.metafieldsSet.userErrors || [];
         if (errs.length) {
           console.error(`⚠️ UserErrors ${node.sku || node.title}:`, JSON.stringify(errs));
-          continue;
+        } else {
+          // Rilettura per conferma
+          const check = await GQL(
+            `query($id:ID!){ productVariant(id:$id){ metafield(namespace:"custom", key:"sede_disponibilita"){ value } } }`,
+            { id: node.id }
+          );
+          const afterVal = check.productVariant?.metafield?.value || "";
+          console.log(`✔ ${node.sku || node.title}: before="${current}" -> after="${afterVal}"`);
+          changes.push({
+            id: node.id,
+            sku: node.sku || '',
+            title: node.title || '',
+            before: current,
+            after: afterVal
+          });
+          updated++;
         }
-
-        // Rilettura per conferma
-        const check = await GQL(
-          `query($id:ID!){ productVariant(id:$id){ metafield(namespace:"custom", key:"sede_disponibilita"){ value } } }`,
-          { id: node.id }
-        );
-        const afterVal = check.productVariant?.metafield?.value || "";
-        console.log(`✔ ${node.sku || node.title}: before="${current}" -> after="${afterVal}"`);
-        updated++;
       } catch (e) {
         console.error(`❌ Mutation error ${node.sku || node.title}:`, e.message);
       }
+
+      processed++;
     }
 
     if (!data.productVariants.pageInfo.hasNextPage) break;
     after = data.productVariants.pageInfo.endCursor;
   }
 
-  console.log(`✅ Done. Processed: ${processed}, Updated: ${updated}`);
+  // Scrivi CSV report
+  const csvPath = '/tmp/sede_updates.csv';
+  const header = 'variant_id;sku;title;before;after\n';
+  const rows = changes.map(c =>
+    `${c.id};${(c.sku||'').replaceAll(';',',')};${(c.title||'').replaceAll(';',',')};${(c.before||'').replaceAll(';',',')};${(c.after||'').replaceAll(';',',')}\n`
+  );
+  fs.writeFileSync(csvPath, header + rows.join(''), 'utf8');
+
+  // Riepilogo chiaro
+  console.log('--- SUMMARY ---');
+  console.log(`Processed: ${processed}`);
+  console.log(`Updated:   ${updated}`);
+  console.log(`Skipped:   ${skipped}`);
+  console.log(`Report:    ${csvPath}`);
 }
 
 run().catch(e => { console.error('💥 Task failed:', e.message); process.exit(1); });
