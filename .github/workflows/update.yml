@@ -32,9 +32,17 @@ jobs:
       - name: Run updater
         run: node update_sede_disponibilita.js
 
-      - name: Upload CSV report
+      - name: Upload CSV report - updated
         uses: actions/upload-artifact@v4
         with:
           name: sede_updates
           path: /tmp/sede_updates.csv
           if-no-files-found: warn
+
+      - name: Upload CSV report - skipped
+        uses: actions/upload-artifact@v4
+        with:
+          name: sede_skipped
+          path: /tmp/sede_skipped.csv
+          if-no-files-found: warn
+
