@@ -2,7 +2,7 @@ name: Update sede_disponibilita
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # ogni 10 minuti
+    - cron: "*/30 * * * *"   # ogni 30 minuti
   workflow_dispatch:
 
 jobs:
@@ -13,7 +13,7 @@ jobs:
       SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
       SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
       LOCATION_PRIORITY: ${{ secrets.LOCATION_PRIORITY }}
-      VARIANTS_PER_RUN: "5000"
+      VARIANTS_PER_RUN: "10000"
     steps:
       - uses: actions/checkout@v4
 
