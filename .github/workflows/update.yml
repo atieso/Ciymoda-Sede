@@ -13,7 +13,7 @@ jobs:
       SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
       SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
       LOCATION_PRIORITY: ${{ secrets.LOCATION_PRIORITY }}
-      VARIANTS_PER_RUN: "400"
+      VARIANTS_PER_RUN: "5000"
     steps:
       - uses: actions/checkout@v4
 
