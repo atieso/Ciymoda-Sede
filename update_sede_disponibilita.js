@@ -1,6 +1,4 @@
-// update_sede_disponibilita.js – con CSV report e filtri di test
-// Scopes necessari: read_products, write_products, read_inventory, read_locations
-
+// update_sede_disponibilita.js – updates + skipped report
 import fs from "node:fs";
 
 const SHOP = process.env.SHOPIFY_SHOP_DOMAIN;
@@ -8,12 +6,12 @@ const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const PRIORITY = (process.env.LOCATION_PRIORITY || 'CityModa Lecce|Citymoda Triggiano').split('|').map(s=>s.trim());
 const VARIANTS_PER_RUN = parseInt(process.env.VARIANTS_PER_RUN || '10000', 10);
 const API_VERSION = '2025-10';
-
-// Facoltativo: filtra per SKU specifici (separati da |), utile per test mirati
 const TEST_SKUS = (process.env.TEST_SKUS || '').split('|').map(s=>s.trim()).filter(Boolean);
 const ONLY_TEST = TEST_SKUS.length > 0;
 
 if (!SHOP || !TOKEN) { console.error('❌ Missing env'); process.exit(1); }
+
+const gidNum = gid => (gid || '').split('/').pop();
 
 async function GQL(query, variables) {
   const res = await fetch(`https://${SHOP}/admin/api/${API_VERSION}/graphql.json`, {
@@ -36,6 +34,7 @@ query($after: String) {
         id
         title
         sku
+        product { id title }
         metafield(namespace:"custom", key:"sede_disponibilita"){ value }
         inventoryItem {
           id
@@ -57,12 +56,11 @@ query($after: String) {
 const mSet = `
 mutation setMeta($metafields: [MetafieldsSetInput!]!) {
   metafieldsSet(metafields: $metafields) {
-    metafields { key value }   # <-- rimosso owner { id }
+    metafields { key value }
     userErrors { field message }
   }
 }
 `;
-
 
 function chooseLocation(levels) {
   const prio = PRIORITY.map(n => n.trim().toLowerCase());
@@ -77,13 +75,12 @@ function chooseLocation(levels) {
 async function run() {
   console.log(`▶ Start. Shop: ${SHOP}`);
   console.log(`Priority: ${PRIORITY.join(' > ')}`);
-  console.log(`API: ${API_VERSION}`);
-  if (ONLY_TEST) console.log(`TEST_SKUS attivo → elaboro solo: ${TEST_SKUS.join(', ')}`);
+  if (ONLY_TEST) console.log(`TEST_SKUS attivo: ${TEST_SKUS.join(', ')}`);
+  await GQL(`{ shop { name } }`, {});
 
-  await GQL(`{ shop { name } }`, {}); // sanity token/scopes
-
-  let after = null, processed = 0, updated = 0, skipped = 0;
-  const changes = []; // per CSV
+  let after = null, processed = 0, updated = 0;
+  const changes = [];
+  const skipped = [];
 
   while (processed < VARIANTS_PER_RUN) {
     const data = await GQL(qVariants, { after });
@@ -92,10 +89,19 @@ async function run() {
 
     for (const { node } of edges) {
       if (processed >= VARIANTS_PER_RUN) break;
+      processed++;
 
-      // filtro per SKU se in test
       if (ONLY_TEST && node.sku && !TEST_SKUS.includes(node.sku)) {
-        skipped++; processed++; continue;
+        skipped.push({
+          variantGid: node.id,
+          variantId: gidNum(node.id),
+          productId: gidNum(node.product?.id),
+          sku: node.sku || '',
+          variantTitle: node.title || '',
+          productTitle: node.product?.title || '',
+          reason: 'not_in_TEST_SKUS'
+        });
+        continue;
       }
 
       const levels = (node.inventoryItem?.inventoryLevels?.edges || []).map(e => {
@@ -107,14 +113,37 @@ async function run() {
         };
       });
 
-      // Log diagnostico livelli
       console.log(`Levels for ${node.sku || node.title}: ${levels.map(l => `${l.location?.name}:${l.available}`).join(' | ') || '—'}`);
 
       const chosen = chooseLocation(levels);
       const current = node.metafield?.value || "";
 
+      // nessuna sede con stock
+      const totalAvail = levels.reduce((acc, l) => acc + (l.available || 0), 0);
+      if (!chosen && totalAvail === 0) {
+        skipped.push({
+          variantGid: node.id,
+          variantId: gidNum(node.id),
+          productId: gidNum(node.product?.id),
+          sku: node.sku || '',
+          variantTitle: node.title || '',
+          productTitle: node.product?.title || '',
+          reason: 'no_stock_in_priority_or_any'
+        });
+        continue;
+      }
+
+      // già uguale
       if (current === chosen) {
-        skipped++; processed++;
+        skipped.push({
+          variantGid: node.id,
+          variantId: gidNum(node.id),
+          productId: gidNum(node.product?.id),
+          sku: node.sku || '',
+          variantTitle: node.title || '',
+          productTitle: node.product?.title || '',
+          reason: 'same_value'
+        });
         continue;
       }
 
@@ -131,8 +160,17 @@ async function run() {
         const errs = setRes.metafieldsSet.userErrors || [];
         if (errs.length) {
           console.error(`⚠️ UserErrors ${node.sku || node.title}:`, JSON.stringify(errs));
+          skipped.push({
+            variantGid: node.id,
+            variantId: gidNum(node.id),
+            productId: gidNum(node.product?.id),
+            sku: node.sku || '',
+            variantTitle: node.title || '',
+            productTitle: node.product?.title || '',
+            reason: 'mutation_error'
+          });
         } else {
-          // Rilettura per conferma
+          // rilettura per conferma
           const check = await GQL(
             `query($id:ID!){ productVariant(id:$id){ metafield(namespace:"custom", key:"sede_disponibilita"){ value } } }`,
             { id: node.id }
@@ -140,9 +178,12 @@ async function run() {
           const afterVal = check.productVariant?.metafield?.value || "";
           console.log(`✔ ${node.sku || node.title}: before="${current}" -> after="${afterVal}"`);
           changes.push({
-            id: node.id,
+            variantGid: node.id,
+            variantId: gidNum(node.id),
+            productId: gidNum(node.product?.id),
             sku: node.sku || '',
-            title: node.title || '',
+            variantTitle: node.title || '',
+            productTitle: node.product?.title || '',
             before: current,
             after: afterVal
           });
@@ -150,29 +191,68 @@ async function run() {
         }
       } catch (e) {
         console.error(`❌ Mutation error ${node.sku || node.title}:`, e.message);
+        skipped.push({
+          variantGid: node.id,
+          variantId: gidNum(node.id),
+          productId: gidNum(node.product?.id),
+          sku: node.sku || '',
+          variantTitle: node.title || '',
+          productTitle: node.product?.title || '',
+          reason: 'mutation_exception'
+        });
       }
-
-      processed++;
     }
 
     if (!data.productVariants.pageInfo.hasNextPage) break;
     after = data.productVariants.pageInfo.endCursor;
   }
 
-  // Scrivi CSV report
-  const csvPath = '/tmp/sede_updates.csv';
-  const header = 'variant_id;sku;title;before;after\n';
-  const rows = changes.map(c =>
-    `${c.id};${(c.sku||'').replaceAll(';',',')};${(c.title||'').replaceAll(';',',')};${(c.before||'').replaceAll(';',',')};${(c.after||'').replaceAll(';',',')}\n`
-  );
-  fs.writeFileSync(csvPath, header + rows.join(''), 'utf8');
+  // write updates CSV
+  const updatesPath = '/tmp/sede_updates.csv';
+  const updatesHeader = 'variant_gid;variant_id;product_id;sku;variant_title;product_title;before;after;admin_product_url;admin_variant_url\n';
+  const updatesRows = changes.map(c => {
+    const adminProductURL = `https://${SHOP}/admin/products/${c.productId}`;
+    const adminVariantURL = `https://${SHOP}/admin/products/${c.productId}/variants/${c.variantId}`;
+    return [
+      c.variantGid,
+      c.variantId,
+      c.productId,
+      c.sku.replaceAll(';',','),
+      c.variantTitle.replaceAll(';',','),
+      c.productTitle.replaceAll(';',','),
+      (c.before||'').replaceAll(';',','),
+      (c.after||'').replaceAll(';',','),
+      adminProductURL,
+      adminVariantURL
+    ].join(';') + '\n';
+  });
+  fs.writeFileSync(updatesPath, updatesHeader + updatesRows.join(''), 'utf8');
 
-  // Riepilogo chiaro
+  // write skipped CSV
+  const skippedPath = '/tmp/sede_skipped.csv';
+  const skippedHeader = 'variant_gid;variant_id;product_id;sku;variant_title;product_title;reason;admin_product_url;admin_variant_url\n';
+  const skippedRows = skipped.map(c => {
+    const adminProductURL = `https://${SHOP}/admin/products/${c.productId}`;
+    const adminVariantURL = `https://${SHOP}/admin/products/${c.productId}/variants/${c.variantId}`;
+    return [
+      c.variantGid,
+      c.variantId,
+      c.productId,
+      (c.sku||'').replaceAll(';',','),
+      (c.variantTitle||'').replaceAll(';',','),
+      (c.productTitle||'').replaceAll(';',','),
+      c.reason,
+      adminProductURL,
+      adminVariantURL
+    ].join(';') + '\n';
+  });
+  fs.writeFileSync(skippedPath, skippedHeader + skippedRows.join(''), 'utf8');
+
   console.log('--- SUMMARY ---');
   console.log(`Processed: ${processed}`);
   console.log(`Updated:   ${updated}`);
-  console.log(`Skipped:   ${skipped}`);
-  console.log(`Report:    ${csvPath}`);
+  console.log(`Skipped:   ${skipped.length}`);
+  console.log(`Report OK: ${updatesPath} + ${skippedPath}`);
 }
 
 run().catch(e => { console.error('💥 Task failed:', e.message); process.exit(1); });
