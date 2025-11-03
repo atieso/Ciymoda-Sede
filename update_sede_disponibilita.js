@@ -57,11 +57,12 @@ query($after: String) {
 const mSet = `
 mutation setMeta($metafields: [MetafieldsSetInput!]!) {
   metafieldsSet(metafields: $metafields) {
-    metafields { owner { id } key value }
+    metafields { key value }   # <-- rimosso owner { id }
     userErrors { field message }
   }
 }
 `;
+
 
 function chooseLocation(levels) {
   const prio = PRIORITY.map(n => n.trim().toLowerCase());
