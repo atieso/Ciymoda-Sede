@@ -1,30 +1,58 @@
-// update_sede_disponibilita.js – con cursore persistente
-import fs from "node:fs";
-
+// update_sede_disponibilita.js
+// versione con cursore persistente su METAFIELD DEL NEGOZIO
 const SHOP = process.env.SHOPIFY_SHOP_DOMAIN;
 const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const PRIORITY = (process.env.LOCATION_PRIORITY || 'CityModa Lecce|Citymoda Triggiano').split('|').map(s=>s.trim());
 const VARIANTS_PER_RUN = parseInt(process.env.VARIANTS_PER_RUN || '50000', 10);
 const API_VERSION = '2025-10';
-const CURSOR_FILE = '.shopify_variant_cursor.json';
 
-if (!SHOP || !TOKEN) { console.error('❌ Missing env'); process.exit(1); }
-
-const gidNum = gid => (gid || '').split('/').pop();
+if (!SHOP || !TOKEN) {
+  console.error('❌ Missing env');
+  process.exit(1);
+}
 
 async function GQL(query, variables) {
   const res = await fetch(`https://${SHOP}/admin/api/${API_VERSION}/graphql.json`, {
     method: 'POST',
-    headers: { 'Content-Type':'application/json', 'X-Shopify-Access-Token': TOKEN },
+    headers: {
+      'Content-Type':'application/json',
+      'X-Shopify-Access-Token': TOKEN
+    },
     body: JSON.stringify({ query, variables })
   });
   const text = await res.text();
-  let json; try { json = JSON.parse(text); } catch { console.error(text); throw new Error(`GraphQL HTTP ${res.status}`); }
-  if (!res.ok || json.errors) { console.error('❌ GraphQL', res.status, res.statusText, JSON.stringify(json.errors||json,null,2)); throw new Error('GraphQL error'); }
+  let json;
+  try { json = JSON.parse(text); } catch {
+    console.error(text);
+    throw new Error(`GraphQL HTTP ${res.status}`);
+  }
+  if (!res.ok || json.errors) {
+    console.error('❌ GraphQL', res.status, res.statusText, JSON.stringify(json.errors || json, null, 2));
+    throw new Error('GraphQL error');
+  }
   return json.data;
 }
 
-const qVariants = `
+// 1) leggo shop + metafield cursore
+const Q_SHOP_CURSOR = `
+{
+  shop {
+    id
+    metafield(namespace:"custom", key:"variant_cursor") { value }
+  }
+}
+`;
+
+// 2) salvo shop metafield
+const M_SET_SHOP_CURSOR = `
+mutation setShopCursor($metafields: [MetafieldsSetInput!]!) {
+  metafieldsSet(metafields: $metafields) {
+    userErrors { field message }
+  }
+}
+`;
+
+const Q_VARIANTS = `
 query($after: String) {
   productVariants(first: 200, after: $after, query:"status:active") {
     pageInfo { hasNextPage endCursor }
@@ -52,10 +80,9 @@ query($after: String) {
 }
 `;
 
-const mSet = `
+const M_SET_VARIANT_META = `
 mutation setMeta($metafields: [MetafieldsSetInput!]!) {
   metafieldsSet(metafields: $metafields) {
-    metafields { key value }
     userErrors { field message }
   }
 }
@@ -63,42 +90,37 @@ mutation setMeta($metafields: [MetafieldsSetInput!]!) {
 
 function chooseLocation(levels, priority) {
   const prio = priority.map(n => n.trim().toLowerCase());
+  // prima rispetta la tua priorità
   for (const wanted of prio) {
     const m = levels.find(l => l.locationNameNorm === wanted);
     if (m && (m.available || 0) > 0) return m.location.name;
   }
+  // poi prima sede con stock > 0
   const any = levels.find(l => (l.available || 0) > 0);
   return any ? (any.location?.name || "") : "";
 }
 
-function loadCursor() {
-  try {
-    const raw = fs.readFileSync(CURSOR_FILE, 'utf8');
-    const json = JSON.parse(raw);
-    return json.after || null;
-  } catch {
-    return null;
-  }
-}
-
-function saveCursor(after) {
-  fs.writeFileSync(CURSOR_FILE, JSON.stringify({ after }, null, 2), 'utf8');
-}
-
 async function run() {
-  console.log(`▶ Start. Shop: ${SHOP}`);
-  await GQL(`{ shop { name } }`, {});
+  console.log(`▶ Start. shop=${SHOP}, batch=${VARIANTS_PER_RUN}`);
 
-  let after = loadCursor();
-  if (after) console.log(`📍 Riparto dal cursore: ${after.slice(0, 30)}...`);
+  // leggo cursore salvato nello shop
+  const shopData = await GQL(Q_SHOP_CURSOR, {});
+  const shopId = shopData.shop.id;
+  let after = shopData.shop.metafield?.value || null;
+  if (after) console.log(`📍 Riparto dal cursore Shopify: ${after.slice(0, 35)}...`);
+  else console.log('📍 Nessun cursore precedente: parto dall’inizio');
 
   let processed = 0;
   let lastCursor = after;
+  let hasNext = true;
 
-  while (processed < VARIANTS_PER_RUN) {
-    const data = await GQL(qVariants, { after: lastCursor });
+  while (processed < VARIANTS_PER_RUN && hasNext) {
+    const data = await GQL(Q_VARIANTS, { after: lastCursor });
     const { edges, pageInfo } = data.productVariants;
-    if (!edges.length) break;
+    if (!edges.length) {
+      hasNext = false;
+      break;
+    }
 
     for (const { node } of edges) {
       if (processed >= VARIANTS_PER_RUN) break;
@@ -115,17 +137,14 @@ async function run() {
 
       const chosen = chooseLocation(levels, PRIORITY);
       const current = node.metafield?.value || "";
-      const totalAvail = levels.reduce((acc, l) => acc + (l.available || 0), 0);
+      const totalAvail = levels.reduce((sum, l) => sum + (l.available || 0), 0);
 
-      if (!chosen && totalAvail === 0) {
-        continue; // niente stock in nessuna sede
-      }
+      // niente stock da nessuna parte → salta
+      if (!chosen && totalAvail === 0) continue;
+      // già valorizzato correttamente → salta
+      if (current === chosen) continue;
 
-      if (current === chosen) {
-        continue; // già uguale
-      }
-
-      const metafields = [{
+      const mfInput = [{
         ownerId: node.id,
         namespace: "custom",
         key: "sede_disponibilita",
@@ -134,31 +153,34 @@ async function run() {
       }];
 
       try {
-        const setRes = await GQL(mSet, { metafields });
-        const errs = setRes.metafieldsSet.userErrors || [];
-        if (errs.length) {
-          console.error(`⚠️ UserErrors ${node.sku || node.title}:`, JSON.stringify(errs));
-        } else {
-          console.log(`✔ ${node.sku || node.title}: "${current}" -> "${chosen}"`);
-        }
+        await GQL(M_SET_VARIANT_META, { metafields: mfInput });
+        console.log(`✔ ${node.sku || node.title}: "${current}" -> "${chosen}"`);
       } catch (e) {
-        console.error(`❌ Mutation error ${node.sku || node.title}:`, e.message);
+        console.error(`❌ mutation variante ${node.sku || node.title}:`, e.message);
       }
     }
 
-    if (!pageInfo.hasNextPage) {
-      console.log('✅ Fine varianti: nessun’altra pagina');
-      lastCursor = null;
-      break;
-    }
-
+    hasNext = pageInfo.hasNextPage;
     lastCursor = pageInfo.endCursor;
-    console.log(`➡️ pagina successiva: ${lastCursor.slice(0, 30)}...`);
+    console.log(`➡️ next? ${hasNext}  cursor=${lastCursor ? lastCursor.slice(0, 35)+'...' : 'null'}`);
   }
 
-  // salva il cursore per il prossimo run
-  saveCursor(lastCursor);
-  console.log(`💾 Salvato cursore: ${lastCursor ? lastCursor.slice(0,30)+'...' : 'null (fine)'}`);
+  // salva il cursore nello shop (anche null se abbiamo finito)
+  try {
+    const mfShop = [{
+      ownerId: shopId,
+      namespace: "custom",
+      key: "variant_cursor",
+      type: "single_line_text_field",
+      value: lastCursor || ""
+    }];
+    await GQL(M_SET_SHOP_CURSOR, { metafields: mfShop });
+    console.log(`💾 Cursore salvato nello shop: ${lastCursor ? lastCursor.slice(0,35)+'...' : '(vuoto/fine)'} `);
+  } catch (e) {
+    console.error('⚠️ Non sono riuscito a salvare il cursore nello shop:', e.message);
+  }
+
+  console.log(`✅ Done. Processed=${processed}`);
 }
 
 run().catch(e => { console.error('💥 Task failed:', e.message); process.exit(1); });
