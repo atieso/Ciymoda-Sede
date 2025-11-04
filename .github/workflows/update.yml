@@ -46,3 +46,14 @@ jobs:
           path: /tmp/sede_skipped.csv
           if-no-files-found: warn
 
+      - name: Commit cursor
+        if: always()
+        run: |
+          if [ -f .shopify_variant_cursor.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add .shopify_variant_cursor.json
+            git commit -m "Update Shopify variant cursor" || echo "Nothing to commit"
+            git push
+          fi
+
