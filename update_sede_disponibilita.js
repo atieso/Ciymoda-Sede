@@ -1,4 +1,4 @@
-// update_sede_disponibilita.js – updates + skipped report
+// update_sede_disponibilita.js – con cursore persistente
 import fs from "node:fs";
 
 const SHOP = process.env.SHOPIFY_SHOP_DOMAIN;
@@ -6,8 +6,7 @@ const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const PRIORITY = (process.env.LOCATION_PRIORITY || 'CityModa Lecce|Citymoda Triggiano').split('|').map(s=>s.trim());
 const VARIANTS_PER_RUN = parseInt(process.env.VARIANTS_PER_RUN || '50000', 10);
 const API_VERSION = '2025-10';
-const TEST_SKUS = (process.env.TEST_SKUS || '').split('|').map(s=>s.trim()).filter(Boolean);
-const ONLY_TEST = TEST_SKUS.length > 0;
+const CURSOR_FILE = '.shopify_variant_cursor.json';
 
 if (!SHOP || !TOKEN) { console.error('❌ Missing env'); process.exit(1); }
 
@@ -62,8 +61,8 @@ mutation setMeta($metafields: [MetafieldsSetInput!]!) {
 }
 `;
 
-function chooseLocation(levels) {
-  const prio = PRIORITY.map(n => n.trim().toLowerCase());
+function chooseLocation(levels, priority) {
+  const prio = priority.map(n => n.trim().toLowerCase());
   for (const wanted of prio) {
     const m = levels.find(l => l.locationNameNorm === wanted);
     if (m && (m.available || 0) > 0) return m.location.name;
@@ -72,37 +71,38 @@ function chooseLocation(levels) {
   return any ? (any.location?.name || "") : "";
 }
 
+function loadCursor() {
+  try {
+    const raw = fs.readFileSync(CURSOR_FILE, 'utf8');
+    const json = JSON.parse(raw);
+    return json.after || null;
+  } catch {
+    return null;
+  }
+}
+
+function saveCursor(after) {
+  fs.writeFileSync(CURSOR_FILE, JSON.stringify({ after }, null, 2), 'utf8');
+}
+
 async function run() {
   console.log(`▶ Start. Shop: ${SHOP}`);
-  console.log(`Priority: ${PRIORITY.join(' > ')}`);
-  if (ONLY_TEST) console.log(`TEST_SKUS attivo: ${TEST_SKUS.join(', ')}`);
   await GQL(`{ shop { name } }`, {});
 
-  let after = null, processed = 0, updated = 0;
-  const changes = [];
-  const skipped = [];
+  let after = loadCursor();
+  if (after) console.log(`📍 Riparto dal cursore: ${after.slice(0, 30)}...`);
+
+  let processed = 0;
+  let lastCursor = after;
 
   while (processed < VARIANTS_PER_RUN) {
-    const data = await GQL(qVariants, { after });
-    const edges = data.productVariants.edges || [];
+    const data = await GQL(qVariants, { after: lastCursor });
+    const { edges, pageInfo } = data.productVariants;
     if (!edges.length) break;
 
     for (const { node } of edges) {
       if (processed >= VARIANTS_PER_RUN) break;
       processed++;
-
-      if (ONLY_TEST && node.sku && !TEST_SKUS.includes(node.sku)) {
-        skipped.push({
-          variantGid: node.id,
-          variantId: gidNum(node.id),
-          productId: gidNum(node.product?.id),
-          sku: node.sku || '',
-          variantTitle: node.title || '',
-          productTitle: node.product?.title || '',
-          reason: 'not_in_TEST_SKUS'
-        });
-        continue;
-      }
 
       const levels = (node.inventoryItem?.inventoryLevels?.edges || []).map(e => {
         const qa = (e.node.quantities || []).find(q => q.name === 'available');
@@ -113,38 +113,16 @@ async function run() {
         };
       });
 
-      console.log(`Levels for ${node.sku || node.title}: ${levels.map(l => `${l.location?.name}:${l.available}`).join(' | ') || '—'}`);
-
-      const chosen = chooseLocation(levels);
+      const chosen = chooseLocation(levels, PRIORITY);
       const current = node.metafield?.value || "";
-
-      // nessuna sede con stock
       const totalAvail = levels.reduce((acc, l) => acc + (l.available || 0), 0);
+
       if (!chosen && totalAvail === 0) {
-        skipped.push({
-          variantGid: node.id,
-          variantId: gidNum(node.id),
-          productId: gidNum(node.product?.id),
-          sku: node.sku || '',
-          variantTitle: node.title || '',
-          productTitle: node.product?.title || '',
-          reason: 'no_stock_in_priority_or_any'
-        });
-        continue;
+        continue; // niente stock in nessuna sede
       }
 
-      // già uguale
       if (current === chosen) {
-        skipped.push({
-          variantGid: node.id,
-          variantId: gidNum(node.id),
-          productId: gidNum(node.product?.id),
-          sku: node.sku || '',
-          variantTitle: node.title || '',
-          productTitle: node.product?.title || '',
-          reason: 'same_value'
-        });
-        continue;
+        continue; // già uguale
       }
 
       const metafields = [{
@@ -160,99 +138,27 @@ async function run() {
         const errs = setRes.metafieldsSet.userErrors || [];
         if (errs.length) {
           console.error(`⚠️ UserErrors ${node.sku || node.title}:`, JSON.stringify(errs));
-          skipped.push({
-            variantGid: node.id,
-            variantId: gidNum(node.id),
-            productId: gidNum(node.product?.id),
-            sku: node.sku || '',
-            variantTitle: node.title || '',
-            productTitle: node.product?.title || '',
-            reason: 'mutation_error'
-          });
         } else {
-          // rilettura per conferma
-          const check = await GQL(
-            `query($id:ID!){ productVariant(id:$id){ metafield(namespace:"custom", key:"sede_disponibilita"){ value } } }`,
-            { id: node.id }
-          );
-          const afterVal = check.productVariant?.metafield?.value || "";
-          console.log(`✔ ${node.sku || node.title}: before="${current}" -> after="${afterVal}"`);
-          changes.push({
-            variantGid: node.id,
-            variantId: gidNum(node.id),
-            productId: gidNum(node.product?.id),
-            sku: node.sku || '',
-            variantTitle: node.title || '',
-            productTitle: node.product?.title || '',
-            before: current,
-            after: afterVal
-          });
-          updated++;
+          console.log(`✔ ${node.sku || node.title}: "${current}" -> "${chosen}"`);
         }
       } catch (e) {
         console.error(`❌ Mutation error ${node.sku || node.title}:`, e.message);
-        skipped.push({
-          variantGid: node.id,
-          variantId: gidNum(node.id),
-          productId: gidNum(node.product?.id),
-          sku: node.sku || '',
-          variantTitle: node.title || '',
-          productTitle: node.product?.title || '',
-          reason: 'mutation_exception'
-        });
       }
     }
 
-    if (!data.productVariants.pageInfo.hasNextPage) break;
-    after = data.productVariants.pageInfo.endCursor;
+    if (!pageInfo.hasNextPage) {
+      console.log('✅ Fine varianti: nessun’altra pagina');
+      lastCursor = null;
+      break;
+    }
+
+    lastCursor = pageInfo.endCursor;
+    console.log(`➡️ pagina successiva: ${lastCursor.slice(0, 30)}...`);
   }
 
-  // write updates CSV
-  const updatesPath = '/tmp/sede_updates.csv';
-  const updatesHeader = 'variant_gid;variant_id;product_id;sku;variant_title;product_title;before;after;admin_product_url;admin_variant_url\n';
-  const updatesRows = changes.map(c => {
-    const adminProductURL = `https://${SHOP}/admin/products/${c.productId}`;
-    const adminVariantURL = `https://${SHOP}/admin/products/${c.productId}/variants/${c.variantId}`;
-    return [
-      c.variantGid,
-      c.variantId,
-      c.productId,
-      c.sku.replaceAll(';',','),
-      c.variantTitle.replaceAll(';',','),
-      c.productTitle.replaceAll(';',','),
-      (c.before||'').replaceAll(';',','),
-      (c.after||'').replaceAll(';',','),
-      adminProductURL,
-      adminVariantURL
-    ].join(';') + '\n';
-  });
-  fs.writeFileSync(updatesPath, updatesHeader + updatesRows.join(''), 'utf8');
-
-  // write skipped CSV
-  const skippedPath = '/tmp/sede_skipped.csv';
-  const skippedHeader = 'variant_gid;variant_id;product_id;sku;variant_title;product_title;reason;admin_product_url;admin_variant_url\n';
-  const skippedRows = skipped.map(c => {
-    const adminProductURL = `https://${SHOP}/admin/products/${c.productId}`;
-    const adminVariantURL = `https://${SHOP}/admin/products/${c.productId}/variants/${c.variantId}`;
-    return [
-      c.variantGid,
-      c.variantId,
-      c.productId,
-      (c.sku||'').replaceAll(';',','),
-      (c.variantTitle||'').replaceAll(';',','),
-      (c.productTitle||'').replaceAll(';',','),
-      c.reason,
-      adminProductURL,
-      adminVariantURL
-    ].join(';') + '\n';
-  });
-  fs.writeFileSync(skippedPath, skippedHeader + skippedRows.join(''), 'utf8');
-
-  console.log('--- SUMMARY ---');
-  console.log(`Processed: ${processed}`);
-  console.log(`Updated:   ${updated}`);
-  console.log(`Skipped:   ${skipped.length}`);
-  console.log(`Report OK: ${updatesPath} + ${skippedPath}`);
+  // salva il cursore per il prossimo run
+  saveCursor(lastCursor);
+  console.log(`💾 Salvato cursore: ${lastCursor ? lastCursor.slice(0,30)+'...' : 'null (fine)'}`);
 }
 
 run().catch(e => { console.error('💥 Task failed:', e.message); process.exit(1); });
