@@ -52,8 +52,14 @@ jobs:
           if [ -f .shopify_variant_cursor.json ]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
+
+            # prendo l’ultimo stato del branch remoto
+            git fetch origin ${{ github.ref }} 
+            git checkout ${{ github.ref_name }}
+
             git add .shopify_variant_cursor.json
-            git commit -m "Update Shopify variant cursor" || echo "Nothing to commit"
-            git push
+            git commit -m "Update Shopify variant cursor" || exit 0
+            git push origin ${{ github.ref_name }}
           fi
+
 
