@@ -62,4 +62,11 @@ jobs:
             git push origin ${{ github.ref_name }}
           fi
 
+      - name: Upload cursor
+        uses: actions/upload-artifact@v4
+        with:
+          name: shopify_cursor
+          path: .shopify_variant_cursor.json
+          if-no-files-found: ignore
+
 
