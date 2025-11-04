@@ -8,14 +8,12 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    environment: production      # se usi Environment per i secrets
+    environment: production   # se usi un environment; altrimenti puoi togliere questa riga
     env:
       SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
       SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
       LOCATION_PRIORITY: ${{ secrets.LOCATION_PRIORITY }}
       VARIANTS_PER_RUN: "50000"
-      # Facoltativo: filtra per SKU durante i test
-      # TEST_SKUS: "SKU1|SKU2"
     steps:
       - uses: actions/checkout@v4
 
@@ -32,36 +30,7 @@ jobs:
       - name: Run updater
         run: node update_sede_disponibilita.js
 
-      - name: Upload CSV report - updated
-        uses: actions/upload-artifact@v4
-        with:
-          name: sede_updates
-          path: /tmp/sede_updates.csv
-          if-no-files-found: warn
-
-      - name: Upload CSV report - skipped
-        uses: actions/upload-artifact@v4
-        with:
-          name: sede_skipped
-          path: /tmp/sede_skipped.csv
-          if-no-files-found: warn
-
-      - name: Commit cursor
-        if: always()
-        run: |
-          if [ -f .shopify_variant_cursor.json ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-
-            # prendo l’ultimo stato del branch remoto
-            git fetch origin ${{ github.ref }} 
-            git checkout ${{ github.ref_name }}
-
-            git add .shopify_variant_cursor.json
-            git commit -m "Update Shopify variant cursor" || exit 0
-            git push origin ${{ github.ref_name }}
-          fi
-
+      # 👇 questo salva il cursore prodotto dallo script
       - name: Upload cursor
         uses: actions/upload-artifact@v4
         with:
@@ -69,4 +38,17 @@ jobs:
           path: .shopify_variant_cursor.json
           if-no-files-found: ignore
 
+      # 👇 se vuoi tenere anche i csv dei prodotti aggiornati/mancanti
+      - name: Upload updates
+        uses: actions/upload-artifact@v4
+        with:
+          name: sede_updates
+          path: /tmp/sede_updates.csv
+          if-no-files-found: ignore
 
+      - name: Upload skipped
+        uses: actions/upload-artifact@v4
+        with:
+          name: sede_skipped
+          path: /tmp/sede_skipped.csv
+          if-no-files-found: ignore
